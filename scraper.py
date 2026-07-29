@@ -115,8 +115,6 @@ def pronadji_csv_url(datum: datetime) -> str | None:
     return None
 
 
-
-
 def preuzmi_csv(url: str) -> str:
     resp = requests.get(url, timeout=30)
     resp.raise_for_status()
@@ -126,8 +124,6 @@ def preuzmi_csv(url: str) -> str:
         except UnicodeDecodeError:
             continue
     raise ValueError(f"Ne mogu dekodirati CSV s {url}")
-
-
 
 
 # ---------- OBRADA CSV-A ----------
@@ -141,8 +137,6 @@ def normaliziraj_kategoriju(raw: str) -> str | None:
     return raw.strip().upper()
 
 
-
-
 def parsiraj_broj(raw: str) -> float | None:
     """Vraća None za prazno ILI '0'/'0.00' - KTC koristi 0.00 kao "nema
     vrijednosti" umjesto praznog polja."""
@@ -153,8 +147,6 @@ def parsiraj_broj(raw: str) -> float | None:
     except ValueError:
         return None
     return vrijednost if vrijednost != 0 else None
-
-
 
 
 def obradi_csv(sadrzaj: str) -> list[dict]:
@@ -209,13 +201,9 @@ def obradi_csv(sadrzaj: str) -> list[dict]:
     return proizvodi
 
 
-
-
 # ---------- ODABIR PROIZVODA ----------
 def deterministicki_kljuc(p: dict) -> str:
     return hashlib.md5(p["barkod"].encode()).hexdigest()
-
-
 
 
 def odaberi_proizvode(proizvodi: list[dict]) -> list[dict]:
@@ -253,8 +241,6 @@ def odaberi_proizvode(proizvodi: list[dict]) -> list[dict]:
     return odabrani
 
 
-
-
 # ---------- SPREMANJE ----------
 def spremi_u_firestore(proizvodi: list[dict], batch_size: int = 500) -> int:
     ukupno = len(proizvodi)
@@ -277,6 +263,48 @@ def spremi_u_firestore(proizvodi: list[dict], batch_size: int = 500) -> int:
     return brojac
 
 
+# ---------- PADOVI CIJENA ----------
+def detektiraj_i_spremi_padove(db, trgovina, grad, novi_proizvodi, batch_size=500):
+    danas = datetime.now().strftime("%Y-%m-%d")
+    print(f"  [price_drop] Provjeravam padove cijena za {trgovina} ({grad})...")
+    doc_refs = []
+    for p in novi_proizvodi:
+        doc_id = f"{p['barkod']}_{trgovina}_{grad}".replace(" ", "_")
+        doc_refs.append(db.collection("cijene").document(doc_id))
+    postojeca = {}
+    snapshots = db.get_all(doc_refs)
+    for snap in snapshots:
+        if snap.exists:
+            data = snap.to_dict()
+            postojeca[data.get("barkod", "")] = data
+    padovi = []
+    for p in novi_proizvodi:
+        barkod = p["barkod"]
+        if barkod not in postojeca:
+            continue
+        stara = postojeca[barkod].get("cijena")
+        nova = p.get("cijena")
+        if stara is None or nova is None:
+            continue
+        if stara > nova and p.get("tip") == "redovno":
+            postotak = round((stara - nova) / stara * 100, 1)
+            padovi.append({"barkod": barkod, "naziv": p.get("naziv", ""), "trgovina": trgovina, "grad": grad, "kategorija": p.get("kategorija"), "cijena_stara": stara, "cijena_nova": nova, "postotak": postotak, "datum": danas, "tip_pada": "redovno"})
+    if not padovi:
+        print(f"  [price_drop] Nema padova cijena za {trgovina}.")
+        return []
+    batch = db.batch()
+    brojac = 0
+    for pad in padovi:
+        doc_id = f"{pad['barkod']}_{pad['trgovina']}_{pad['datum']}".replace(" ", "_")
+        batch.set(db.collection("price_drops").document(doc_id), pad)
+        brojac += 1
+        if brojac % batch_size == 0:
+            batch.commit()
+            batch = db.batch()
+    if brojac % batch_size != 0:
+        batch.commit()
+    print(f"  [price_drop] ✅ Pronađeno {len(padovi)} padova cijena za {trgovina}.")
+    return padovi
 
 
 # ---------- GLAVNI DIO ----------
@@ -327,12 +355,11 @@ def main():
 
 
     if odabrani:
+        detektiraj_i_spremi_padove(db, TRGOVINA, GRAD, odabrani)
         spremi_u_firestore(odabrani)
         print(f"\n✅ Završeno! Upisano {len(odabrani)} dokumenata za {TRGOVINA}.")
     else:
         print("❌ Nema odabranih proizvoda, ništa nije spremljeno.")
-
-
 
 
 if __name__ == "__main__":
