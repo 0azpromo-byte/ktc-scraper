@@ -26,6 +26,7 @@ import hashlib
 import io
 import os
 import re
+import time
 from datetime import datetime, timedelta
 
 
@@ -254,11 +255,27 @@ def spremi_u_firestore(proizvodi: list[dict], batch_size: int = 500) -> int:
         batch.set(doc_ref, data, merge=True)
         brojac += 1
         if brojac % batch_size == 0:
-            batch.commit()
+            for attempt in range(3):
+                try:
+                    batch.commit()
+                    break
+                except Exception as e:
+                    if attempt == 2:
+                        raise
+                    print(f"  ⚠️ Batch error (pokusaj {attempt+2}/3): {e}")
+                    time.sleep(5)
             print(f"  ✅ Spremljeno {brojac}/{ukupno}")
             batch = db.batch()
     if brojac % batch_size != 0:
-        batch.commit()
+        for attempt in range(3):
+            try:
+                batch.commit()
+                break
+            except Exception as e:
+                if attempt == 2:
+                    raise
+                print(f"  ⚠️ Batch error (pokusaj {attempt+2}/3): {e}")
+                time.sleep(5)
         print(f"  ✅ Spremljeno {brojac}/{ukupno}")
     return brojac
 
