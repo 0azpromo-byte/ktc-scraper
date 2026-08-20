@@ -27,7 +27,12 @@ import io
 import os
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+try:
+    from zoneinfo import ZoneInfo
+    _ZAGREB = ZoneInfo("Europe/Zagreb")
+except Exception:
+    _ZAGREB = timezone(timedelta(hours=2))
 
 
 import requests
@@ -156,7 +161,7 @@ def obradi_csv(sadrzaj: str) -> list[dict]:
 
 
     for row in reader:
-        barkod = (row.get("Barkod") or "").strip()
+        barkod = (row.get("Barkod") or "").strip().strip("'\"")
         naziv = (row.get("Naziv proizvoda") or "").strip()
         kategorija_raw = (row.get("Kategorija") or "").strip()
 
@@ -208,36 +213,39 @@ def deterministicki_kljuc(p: dict) -> str:
 
 
 def odaberi_proizvode(proizvodi: list[dict]) -> list[dict]:
+    # Akcije imaju prioritet - uvijek su uključene, ne gube se u kvoti
+    akcije = sorted((p for p in proizvodi if p.get("tip") == "akcija"), key=deterministicki_kljuc)
+
     kategorije: dict[str, list[dict]] = {}
     for p in proizvodi:
-        kategorije.setdefault(p["kategorija"], []).append(p)
-
+        if p.get("tip") != "akcija":
+            kategorije.setdefault(p["kategorija"], []).append(p)
 
     print("🔍 Pronađene kategorije:")
     for kat, lista in sorted(kategorije.items(), key=lambda x: -len(x[1])):
         print(f"   {kat}: {len(lista)}")
 
+    odabrani = list(akcije)
+    preostala_kvota = (KVOTA_HRANA + KVOTA_OSTALO_UKUPNO) - len(odabrani)
+    if preostala_kvota <= 0:
+        return odabrani
 
-    odabrani = []
-
-
+    # 1. Hrana - fiksna kvota (ostatak nakon akcija)
     hrana = sorted(kategorije.get("HRANA", []), key=deterministicki_kljuc)
-    odabrani.extend(hrana[:KVOTA_HRANA])
-    print(f"  📌 HRANA: odabrano {min(len(hrana), KVOTA_HRANA)}/{len(hrana)}")
+    broj_hrana = min(len(hrana), preostala_kvota // 2)
+    odabrani.extend(hrana[:broj_hrana])
+    print(f"  📌 HRANA: odabrano {broj_hrana}/{len(hrana)}")
 
-
+    # 2. Ostale kategorije - proporcionalno po dostupnosti (ostatak)
+    preostalo_ostalo = preostala_kvota - broj_hrana
     ostale_kat = {k: v for k, v in kategorije.items() if k != "HRANA"}
     ukupno_ostalo_dostupno = sum(len(v) for v in ostale_kat.values())
 
-
     for kat, lista in sorted(ostale_kat.items(), key=lambda x: -len(x[1])):
         udio = len(lista) / ukupno_ostalo_dostupno if ukupno_ostalo_dostupno else 0
-        broj = round(udio * KVOTA_OSTALO_UKUPNO)
-        broj = min(broj, len(lista))
-        lista_sortirana = sorted(lista, key=deterministicki_kljuc)
-        odabrani.extend(lista_sortirana[:broj])
+        broj = min(round(udio * preostalo_ostalo), len(lista))
+        odabrani.extend(sorted(lista, key=deterministicki_kljuc)[:broj])
         print(f"  📌 {kat}: odabrano {broj}/{len(lista)}")
-
 
     return odabrani
 
@@ -326,6 +334,12 @@ def detektiraj_i_spremi_padove(db, trgovina, grad, novi_proizvodi, batch_size=50
 
 # ---------- GLAVNI DIO ----------
 def main():
+    # Limit: ne scrapaj prije 08:00 po hrvatskom vremenu
+    zagreb_sad = datetime.now(_ZAGREB)
+    if zagreb_sad.hour < 8:
+        print(f"⏰ Još nije 08:00 po hrvatskom vremenu ({zagreb_sad:%H:%M}). Preskačem scrapanje.")
+        return
+
     print("\n" + "=" * 50)
     print(f"🛒 {TRGOVINA} ({GRAD}) Automatski Scraper")
     nacin = f"LOKALNI TEST ({KVOTA_HRANA + KVOTA_OSTALO_UKUPNO} proizvoda)" if LOKALNI_TEST else f"PUNI RUN ({KVOTA_HRANA + KVOTA_OSTALO_UKUPNO} proizvoda)"
