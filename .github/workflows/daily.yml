@@ -2,7 +2,13 @@ name: Scrape KTC
 
 on:
   schedule:
+    # 23:00 UTC = 01:00 lokalno; s GitHubovim delayem (~6-10 h) obično padne
+    # ujutro 09-10 lokalno. 07:10 UTC = 09:10 lokalno ljeti / 08:10 zimi je
+    # garantirana rezerva koja uvijek starta NAKON 08:00 lokalno (delay samo
+    # odgađa, nikad ne pomiče ranije). Guard u scraperu preskače sve prije
+    # 08:00 lokalno, pa barem jedan run po danu uvijek prođe.
     - cron: '0 23 * * *'
+    - cron: '10 7 * * *'
   workflow_dispatch:
 
 jobs:
@@ -21,7 +27,7 @@ jobs:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: |
           echo "$FIREBASE_SERVICE_ACCOUNT" > serviceAccountKey.json
-          python scraper.py
+          python scrape.py
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
